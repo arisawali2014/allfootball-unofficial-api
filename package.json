@@ -1,0 +1,18 @@
+{
+  "name": "af-api",
+  "version": "1.0.0",
+  "description": "Local JSON API over allfootballapp.com - leagues, teams, squads, player details incl. market value",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node --env-file-if-exists=.env src/index.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20.18"
+  },
+  "dependencies": {
+    "express": "^4.21.0",
+    "swagger-ui-dist": "^5.32.13"
+  }
+}

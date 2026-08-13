@@ -1,0 +1,750 @@
+openapi: 3.1.0
+
+info:
+  title: af-api
+  version: 1.0.0
+  summary: Local JSON API over allfootballapp.com
+  description: |
+    Leagues, teams, squads and player detail (incl. market value history and
+    transfers), scraped and normalised from allfootballapp.com.
+
+    **Language of the data.** Upstream is Dongqiudi's backend, which localises
+    every human-readable string (names, nationalities, positions, preferred
+    foot, age suffix) from the `app` query parameter it receives. This API sends
+    `app=af` (AllFootball), so names come back in Latin script. The two
+    HTML-scraped routes (`/api/leagues`, `/api/league/{cid}/teams`) read the
+    site's Indonesian pages, so **league names are Indonesian**.
+
+    **Links.** Every `href` in a response is an absolute URL pointing at this
+    API — leagues link to their teams route, teams to their squad route, squad
+    members to their player route — so a client can walk the graph without
+    building URLs. They are built from the request's scheme and `Host` header
+    and injected per-request, so they are never stored in the cache. No response
+    links to allfootballapp.com; upstream URLs survive only in `logo` fields.
+
+    **Configuration.** `npm start` runs with `--env-file-if-exists=.env`, so a
+    `.env` file beside `package.json` is loaded automatically; plain environment
+    variables work the same. `PORT` (default 3000), `DOCS_ENABLED` (on by
+    default — `false`/`0`/`off`/`no` hides `/docs`, `/openapi.yaml` and
+    `/docs/reference.md`), `CACHE_TTL_MS` (one TTL for every cache kind).
+
+    **Caching.** Responses are memoised in-process and lost on restart:
+    leagues 24 h, teams 1 h, squad 1 h, player 6 h, aggregate 6 h. Override all
+    of them with the `CACHE_TTL_MS` environment variable.
+
+    **Upstream politeness.** Max 3 concurrent upstream calls, at least 500 ms
+    between request starts, 15 s timeout, 3 retries with 1 s / 3 s / 9 s backoff
+    on 429 and 5xx.
+  license:
+    name: UNLICENSED
+
+servers:
+  - url: /
+    description: >-
+      Wherever this spec is being served from. Keeps "Try it out" pointed at the
+      running instance whatever host or port it is on.
+  - url: http://localhost:{port}
+    description: Local development server
+    variables:
+      port:
+        default: '3000'
+        description: Overridden with the PORT environment variable
+
+tags:
+  - name: meta
+    description: Service health and documentation
+  - name: competitions
+    description: Leagues and their teams
+  - name: squads
+    description: Team rosters
+  - name: players
+    description: Player detail
+
+paths:
+  /health:
+    get:
+      tags: [meta]
+      summary: Liveness probe
+      operationId: getHealth
+      responses:
+        '200':
+          description: Service is up
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok:
+                    type: boolean
+                    const: true
+                  docs:
+                    type: boolean
+                    description: Whether this instance serves the docs (DOCS_ENABLED)
+                required: [ok, docs]
+              example:
+                ok: true
+                docs: true
+
+  /docs:
+    get:
+      tags: [meta]
+      summary: Browsable API reference (Swagger UI)
+      description: |
+        Served only when `DOCS_ENABLED` is on (the default; `false`, `0`, `off`
+        or `no` disable it). The UI assets under `/docs/*` come from the bundled
+        swagger-ui-dist package, so the page works offline. When docs are off,
+        this and every other docs path return the standard 404 error object.
+      operationId: getDocs
+      responses:
+        '200':
+          description: HTML page
+          content:
+            text/html:
+              schema:
+                type: string
+        '404':
+          $ref: '#/components/responses/DocsDisabled'
+
+  /openapi.yaml:
+    get:
+      tags: [meta]
+      summary: This specification
+      description: Served only when `DOCS_ENABLED` is on.
+      operationId: getOpenApiSpec
+      responses:
+        '200':
+          description: The OpenAPI 3.1 document
+          content:
+            application/yaml:
+              schema:
+                type: string
+        '404':
+          $ref: '#/components/responses/DocsDisabled'
+
+  /docs/reference.md:
+    get:
+      tags: [meta]
+      summary: Prose API reference (API.md), raw
+      description: Served only when `DOCS_ENABLED` is on.
+      operationId: getReferenceMarkdown
+      responses:
+        '200':
+          description: Markdown document
+          content:
+            text/markdown:
+              schema:
+                type: string
+        '404':
+          $ref: '#/components/responses/DocsDisabled'
+
+  /api/leagues:
+    get:
+      tags: [competitions]
+      summary: List all competitions
+      description: |
+        Every competition listed on the upstream standings page. Names are in
+        Indonesian. Cached for 24 h.
+      operationId: listLeagues
+      responses:
+        '200':
+          description: Competition list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  count:
+                    type: integer
+                    description: Number of entries in `leagues`
+                  leagues:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/League'
+                required: [count, leagues]
+              example:
+                count: 278
+                leagues:
+                  - cid: '61'
+                    name: Piala Dunia
+                    logo: https://img1.qunliao.info/fastdfs7/M00/51/EC/rBUBsmk9FlqAR8PLAAAk2Uhs-J4036.png
+                    href: http://localhost:3000/api/league/61/teams
+                  - cid: '100001'
+                    name: Peringkat FIFA
+                    logo: null
+                    href: http://localhost:3000/api/league/100001/teams
+        '502':
+          $ref: '#/components/responses/BadGateway'
+        '504':
+          $ref: '#/components/responses/GatewayTimeout'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/league/{cid}/teams:
+    get:
+      tags: [competitions]
+      summary: List teams in a competition
+      operationId: listLeagueTeams
+      parameters:
+        - $ref: '#/components/parameters/Cid'
+      responses:
+        '200':
+          description: Team list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  count:
+                    type: integer
+                  teams:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Team'
+                required: [count, teams]
+              example:
+                count: 12
+                teams:
+                  - team_id: '2884'
+                    name: Al-Ahli Doha
+                    slug: al-ahli-doha
+                    logo: https://img-sd.allfootballapp.com/fastdfs3/M00/B5/82/ChOxM1xC2Y6AJ_IEAABE_R3rjHc619.png
+                    href: http://localhost:3000/api/team/2884/squad
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          description: No teams found for this competition
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: true
+                message: No teams found for competition 999999
+                status: 404
+        '502':
+          $ref: '#/components/responses/BadGateway'
+        '504':
+          $ref: '#/components/responses/GatewayTimeout'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/team/{id}/squad:
+    get:
+      tags: [squads]
+      summary: Squad for a team, grouped by role
+      description: |
+        A numeric id with no upstream squad returns `count: 0` and an empty
+        `groups` array rather than a 404. Cached for 1 h.
+      operationId: getTeamSquad
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Team id, as returned by `/api/league/{cid}/teams`
+          schema:
+            type: string
+            pattern: '^\d+$'
+          example: '2889'
+      responses:
+        '200':
+          description: Squad grouped by role
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Squad'
+              example:
+                team_id: '2889'
+                count: 30
+                groups:
+                  - type: attacker
+                    members:
+                      - person_id: '50205787'
+                        person_name: Said Brahmi
+                        person_en_name: Said Brahmi
+                        age: 31
+                        shirtnumber: '30'
+                        position: attacker
+                        statistic:
+                          - Appearances: '-'
+                          - Goals: '-'
+                          - Assists: '-'
+                          - Market Value (EUR): 100K
+                        weekly_salary: null
+                        nationality_name: Qatar/Algeria
+                        captain: false
+                        href: http://localhost:3000/api/player/50205787
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '502':
+          $ref: '#/components/responses/BadGateway'
+        '504':
+          $ref: '#/components/responses/GatewayTimeout'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/player/{id}:
+    get:
+      tags: [players]
+      summary: Full player detail
+      description: Cached for 6 h.
+      operationId: getPlayer
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Person id, as returned inside a squad response
+          schema:
+            type: string
+            pattern: '^\d+$'
+          example: '50205787'
+      responses:
+        '200':
+          description: Player detail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Player'
+              example:
+                person_id: '50205787'
+                name: Said Brahmi
+                en_name: Said Brahmi
+                nationality: Qatar
+                other_nationality: [Algeria]
+                date_of_birth: '1995-06-24'
+                height_cm: 174
+                weight_kg: 74
+                foot: Right
+                position: attacker
+                age: 31
+                status: active
+                current_team:
+                  team_id: '50002889'
+                  team_name: Qatar SC
+                  shirtnumber: '30'
+                market_value_eur: 100000
+                weekly_salary: null
+                contract: '2027-06-30'
+                market_value_history:
+                  - record_date: '2024-06-01'
+                    market_value: 1000000
+                    market_value_text: 1.00m
+                    age: 25
+                    team:
+                      id: '50002888'
+                      name: Al-Sadd
+                transfers:
+                  - date: '2025-07-01'
+                    from_club: Al Khor SC
+                    to_club: Qatar SC
+                    fee: null
+                    type: Free transfer
+                injuries: []
+                career: []
+                character:
+                  styles: []
+                  strength: []
+                  weakness: []
+                href: http://localhost:3000/api/player/50205787
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          description: No such player (upstream returned no `base_info`)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: true
+                message: Player not found (no base_info)
+                status: 404
+        '502':
+          $ref: '#/components/responses/BadGateway'
+        '504':
+          $ref: '#/components/responses/GatewayTimeout'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/league/{cid}/players:
+    get:
+      tags: [players, competitions]
+      summary: Every player in a competition, with full detail
+      description: |
+        Walks every team's squad, then every unique player's detail page.
+        Coaches are excluded.
+
+        **Slow and expensive.** Upstream requests are spaced at least 500 ms
+        apart, so a 12-team league is several hundred requests and can take many
+        minutes on a cold cache. Progress is logged to stdout every 25 players.
+        Individual player failures land in `errors` instead of failing the
+        request. The whole response is cached for 6 h.
+      operationId: listLeaguePlayers
+      parameters:
+        - $ref: '#/components/parameters/Cid'
+      responses:
+        '200':
+          description: Aggregated player detail for the competition
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  cid:
+                    type: string
+                  team_count:
+                    type: integer
+                  player_count:
+                    type: integer
+                    description: Successful lookups only; failures are in `errors`
+                  players:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Player'
+                  errors:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        person_id:
+                          type: string
+                        message:
+                          type: string
+                      required: [person_id, message]
+                required: [cid, team_count, player_count, players, errors]
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          description: No teams found for this competition
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '502':
+          $ref: '#/components/responses/BadGateway'
+        '504':
+          $ref: '#/components/responses/GatewayTimeout'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+components:
+  parameters:
+    Cid:
+      name: cid
+      in: path
+      required: true
+      description: Competition id, as returned by `/api/leagues`
+      schema:
+        type: string
+        pattern: '^\d+$'
+      example: '196'
+
+  responses:
+    BadRequest:
+      description: Path id is not numeric
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: true
+            message: team id must be numeric
+            status: 400
+    BadGateway:
+      description: Upstream network error, non-JSON body, or still failing after retries
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: true
+            message: 'Upstream responded 503 after 4 attempts: https://www.allfootballapp.com/...'
+            status: 502
+    GatewayTimeout:
+      description: Upstream did not respond within 15 s
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: true
+            message: 'Upstream timeout after 15000ms: https://www.allfootballapp.com/...'
+            status: 504
+    DocsDisabled:
+      description: Docs are disabled on this instance (`DOCS_ENABLED=false`)
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: true
+            message: 'Not found: GET /docs'
+            status: 404
+    InternalError:
+      description: Internal error; the message is always generic
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: true
+            message: Internal server error
+            status: 500
+
+  schemas:
+    Error:
+      type: object
+      description: Shape returned by every error, including the catch-all 404 for unknown routes.
+      properties:
+        error:
+          type: boolean
+          const: true
+        message:
+          type: string
+        status:
+          type: integer
+      required: [error, message, status]
+
+    League:
+      type: object
+      properties:
+        cid:
+          type: string
+          description: Competition id; feeds the `/api/league/{cid}/...` routes
+          examples: ['196']
+        name:
+          type: string
+          description: Indonesian name, as shown on the upstream page
+        logo:
+          type: [string, 'null']
+          format: uri
+        href:
+          type: string
+          format: uri
+          description: This API's teams route for the competition
+      required: [cid, name, logo, href]
+
+    Team:
+      type: object
+      properties:
+        team_id:
+          type: string
+          description: Feeds `/api/team/{id}/squad`
+        name:
+          type: string
+        slug:
+          type: string
+          description: Upstream URL slug, kept for reference
+        logo:
+          type: [string, 'null']
+          format: uri
+        href:
+          type: string
+          format: uri
+          description: This API's squad route for the team
+      required: [team_id, name, slug, logo, href]
+
+    Squad:
+      type: object
+      properties:
+        team_id:
+          type: string
+          description: Echoed from the request path
+        count:
+          type: integer
+          description: Total members across all groups, coaches included
+        groups:
+          type: array
+          items:
+            $ref: '#/components/schemas/SquadGroup'
+      required: [team_id, count, groups]
+
+    SquadGroup:
+      type: object
+      properties:
+        type:
+          type: string
+          enum: [coach, goalkeeper, defender, midfielder, attacker]
+        members:
+          type: array
+          items:
+            $ref: '#/components/schemas/SquadMember'
+      required: [type, members]
+
+    SquadMember:
+      type: object
+      properties:
+        person_id:
+          type: [string, 'null']
+          description: Feeds `/api/player/{id}`
+        person_name:
+          type: [string, 'null']
+        person_en_name:
+          type: [string, 'null']
+        age:
+          type: [integer, 'null']
+        shirtnumber:
+          type: [string, 'null']
+        position:
+          type: [string, 'null']
+        statistic:
+          type: array
+          description: Passthrough array of single-key objects; keys vary by competition
+          items:
+            type: object
+            additionalProperties:
+              type: string
+        weekly_salary:
+          type: [string, 'null']
+        nationality_name:
+          type: [string, 'null']
+          description: May list several, slash-separated
+          examples: [Qatar/Algeria]
+        captain:
+          type: boolean
+        href:
+          type: [string, 'null']
+          format: uri
+          description: This API's player route; null when the member has no person_id
+      required:
+        - person_id
+        - person_name
+        - person_en_name
+        - age
+        - shirtnumber
+        - position
+        - statistic
+        - weekly_salary
+        - nationality_name
+        - captain
+        - href
+
+    Player:
+      type: object
+      properties:
+        person_id:
+          type: [string, 'null']
+        name:
+          type: [string, 'null']
+        en_name:
+          type: [string, 'null']
+        nationality:
+          type: [string, 'null']
+        other_nationality:
+          type: array
+          items:
+            type: string
+        date_of_birth:
+          type: [string, 'null']
+          examples: ['1995-06-24']
+        height_cm:
+          type: [integer, 'null']
+        weight_kg:
+          type: [integer, 'null']
+        foot:
+          type: [string, 'null']
+          examples: [Right]
+        position:
+          type: [string, 'null']
+        age:
+          type: [integer, 'null']
+        status:
+          type: [string, 'null']
+        current_team:
+          type: object
+          properties:
+            team_id:
+              type: [string, 'null']
+              description: >-
+                Upstream's person-scoped team id (e.g. 50002889), which is NOT
+                the id used by /api/team/{id}/squad (2889) — hence no link here.
+            team_name:
+              type: [string, 'null']
+            shirtnumber:
+              type: [string, 'null']
+          required: [team_id, team_name, shirtnumber]
+        market_value_eur:
+          type: [integer, 'null']
+          description: Euros
+        weekly_salary:
+          type: [string, 'null']
+        contract:
+          type: [string, 'null']
+          description: Contract expiry date
+        market_value_history:
+          type: array
+          description: Sorted ascending by `record_date`; often empty
+          items:
+            $ref: '#/components/schemas/MarketValueRecord'
+        transfers:
+          type: array
+          items:
+            $ref: '#/components/schemas/Transfer'
+        injuries:
+          description: Raw upstream passthrough; shape not guaranteed
+        career:
+          description: Raw upstream passthrough; shape not guaranteed
+        character:
+          description: Raw upstream passthrough; typically has styles/strength/weakness
+        href:
+          type: string
+          format: uri
+          description: Self link
+      required:
+        - person_id
+        - name
+        - en_name
+        - nationality
+        - other_nationality
+        - date_of_birth
+        - height_cm
+        - weight_kg
+        - foot
+        - position
+        - age
+        - status
+        - current_team
+        - market_value_eur
+        - weekly_salary
+        - contract
+        - market_value_history
+        - transfers
+        - href
+
+    MarketValueRecord:
+      type: object
+      properties:
+        record_date:
+          type: [string, 'null']
+        market_value:
+          type: [integer, 'null']
+          description: Euros
+        market_value_text:
+          type: [string, 'null']
+          examples: [1.00m]
+        age:
+          type: [integer, 'null']
+        team:
+          type: object
+          properties:
+            id:
+              type: [string, 'null']
+            name:
+              type: [string, 'null']
+          required: [id, name]
+      required: [record_date, market_value, market_value_text, age, team]
+
+    Transfer:
+      type: object
+      properties:
+        date:
+          type: [string, 'null']
+        from_club:
+          type: [string, 'null']
+        to_club:
+          type: [string, 'null']
+        fee:
+          type: [string, 'null']
+          description: null for free or undisclosed moves (upstream sends "")
+        type:
+          type: [string, 'null']
+          examples: [Free transfer]
+      required: [date, from_club, to_club, fee, type]
